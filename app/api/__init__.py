@@ -1,1 +1,1 @@
-# API Blueprint Package
+"""API package"""

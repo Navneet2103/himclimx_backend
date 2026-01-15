@@ -1,10 +1,11 @@
 """
 Forecast API Endpoints
 ======================
-Endpoints for climate forecasting and projections.
+Endpoints for time series forecasting and scenario projections.
 """
 
 from flask import Blueprint, jsonify, request
+from app.services.data_service import data_service
 from app.services.forecast_service import forecast_service
 from app.config import Config
 
@@ -12,142 +13,91 @@ forecast_bp = Blueprint('forecast', __name__)
 config = Config()
 
 
-@forecast_bp.route('/prophet', methods=['GET', 'POST'])
-def prophet_forecast():
+@forecast_bp.route('/prophet', methods=['GET'])
+def get_forecast():
     """
-    Generate forecast using Prophet model.
-    
-    Query/Body Parameters:
-        variable (str): Climate variable code (required)
-        region (str): Region code (optional)
-        periods (int): Number of periods to forecast (default: 60 = 5 years)
-        yearly_seasonality (bool): Include yearly seasonality (default: true)
-        include_history (bool): Include historical data (default: true)
-        confidence_interval (float): Confidence interval width (default: 0.95)
-    """
-    if request.method == 'POST':
-        data = request.get_json() or {}
-    else:
-        data = request.args
-    
-    variable = data.get('variable')
-    region = (data.get('region') or '').upper() or None
-    periods = int(data.get('periods', 60))
-    yearly_seasonality = str(data.get('yearly_seasonality', 'true')).lower() == 'true'
-    include_history = str(data.get('include_history', 'true')).lower() == 'true'
-    confidence_interval = float(data.get('confidence_interval', 0.95))
-    
-    if not variable:
-        return jsonify({'error': 'Variable is required'}), 400
-    if variable not in config.CLIMATE_VARIABLES:
-        return jsonify({'error': f'Invalid variable: {variable}'}), 400
-    
-    try:
-        result = forecast_service.prophet_forecast(
-            variable=variable,
-            region=region,
-            periods=periods,
-            yearly_seasonality=yearly_seasonality,
-            include_history=include_history,
-            confidence_interval=confidence_interval
-        )
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@forecast_bp.route('/scenarios', methods=['GET', 'POST'])
-def scenario_forecast():
-    """
-    Generate forecasts under different SSP scenarios.
-    
-    Query/Body Parameters:
-        variable (str): Climate variable code (required)
-        region (str): Region code (optional)
-        target_year (int): Target year for projection (default: 2050)
-        base_period_start (int): Baseline period start (default: 1995)
-        base_period_end (int): Baseline period end (default: 2014)
-    """
-    if request.method == 'POST':
-        data = request.get_json() or {}
-    else:
-        data = request.args
-    
-    variable = data.get('variable')
-    region = (data.get('region') or '').upper() or None
-    target_year = int(data.get('target_year', 2050))
-    base_period_start = int(data.get('base_period_start', 1995))
-    base_period_end = int(data.get('base_period_end', 2014))
-    
-    if not variable:
-        return jsonify({'error': 'Variable is required'}), 400
-    
-    try:
-        result = forecast_service.forecast_scenarios(
-            variable=variable,
-            region=region,
-            target_year=target_year,
-            base_period=(base_period_start, base_period_end)
-        )
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@forecast_bp.route('/summary', methods=['GET'])
-def forecast_summary():
-    """
-    Get forecast summary for multiple variables.
+    Get Prophet-based forecast for a variable and region.
     
     Query Parameters:
-        variables (str): Comma-separated variable codes (default: tmp,pre,pet)
-        region (str): Region code (optional)
+        variable (str): Climate variable code (required)
+        region (str): Region code (required)
         years (int): Number of years to forecast (default: 5)
     """
-    variables_str = request.args.get('variables', 'tmp,pre,pet')
-    region = (request.args.get('region') or '').upper() or None
-    years = int(request.args.get('years', 5))
+    variable = request.args.get('variable')
+    region = request.args.get('region', '').upper()
+    years = request.args.get('years', 5, type=int)
     
-    variables = [v.strip() for v in variables_str.split(',')]
+    if not variable:
+        return jsonify({'error': 'Variable is required'}), 400
+    if not region:
+        return jsonify({'error': 'Region is required'}), 400
+    
+    # Limit forecast years
+    years = min(years, 10)
     
     try:
-        result = forecast_service.get_forecast_summary(
-            variables=variables,
-            region=region,
-            forecast_years=years
+        # Get time series data
+        ts_data = data_service.get_timeseries(
+            variable=variable,
+            region=region
         )
-        return jsonify(result)
+        
+        # Generate forecast
+        forecast = forecast_service.prophet_forecast(
+            times=ts_data['data']['times'],
+            values=ts_data['data']['values'],
+            years=years
+        )
+        
+        return jsonify({
+            'variable': variable,
+            'variable_info': ts_data['variable_info'],
+            'region': region,
+            'forecast_years': years,
+            **forecast
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-@forecast_bp.route('/available-methods', methods=['GET'])
-def available_methods():
+@forecast_bp.route('/scenarios', methods=['GET'])
+def get_scenarios():
     """
-    Get information about available forecasting methods.
-    """
-    try:
-        from prophet import Prophet
-        prophet_available = True
-    except ImportError:
-        prophet_available = False
+    Get climate scenario projections.
     
-    return jsonify({
-        'methods': {
-            'prophet': {
-                'available': prophet_available,
-                'description': 'Facebook Prophet time series forecasting',
-                'features': ['yearly_seasonality', 'trend', 'uncertainty_intervals']
-            },
-            'linear_trend': {
-                'available': True,
-                'description': 'Simple linear trend extrapolation',
-                'features': ['trend', 'confidence_intervals']
-            },
-            'scenarios': {
-                'available': True,
-                'description': 'SSP climate scenario projections',
-                'scenarios': list(config.SSP_SCENARIOS.keys())
-            }
-        }
-    })
+    Query Parameters:
+        variable (str): Climate variable code (required)
+        region (str): Region code (required)
+        target_year (int): Target year for projection (default: 2050)
+    """
+    variable = request.args.get('variable')
+    region = request.args.get('region', '').upper()
+    target_year = request.args.get('target_year', 2050, type=int)
+    
+    if not variable:
+        return jsonify({'error': 'Variable is required'}), 400
+    if not region:
+        return jsonify({'error': 'Region is required'}), 400
+    
+    try:
+        # Get time series data
+        ts_data = data_service.get_timeseries(
+            variable=variable,
+            region=region
+        )
+        
+        # Generate scenarios
+        scenarios = forecast_service.generate_scenarios(
+            times=ts_data['data']['times'],
+            values=ts_data['data']['values'],
+            target_year=target_year
+        )
+        
+        return jsonify({
+            'variable': variable,
+            'variable_info': ts_data['variable_info'],
+            'region': region,
+            **scenarios
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
