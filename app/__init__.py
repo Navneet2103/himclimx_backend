@@ -17,12 +17,12 @@ def create_app():
     """Create and configure the Flask application"""
     app = Flask(__name__)
 
-    # Enable CORS for all routes - FIXED
+    # Enable CORS for all routes - UPDATED FOR PRODUCTION
     CORS(app,
-         origins=["https://himclimx.com", "https://www.himclimx.com", "http://localhost:3000", "*"],
+         resources={r"/*": {"origins": "*"}},
          methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
          allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-         supports_credentials=True)
+         supports_credentials=False)
 
     # Register blueprints
     from app.api.metadata import metadata_bp
@@ -30,14 +30,12 @@ def create_app():
     from app.api.analysis import analysis_bp
     from app.api.forecast import forecast_bp
     from app.api.impact import impact_bp
-    from app.api.scenarios import scenarios_bp  # ADD THIS
 
     app.register_blueprint(metadata_bp, url_prefix='/api/v1/metadata')
     app.register_blueprint(data_bp, url_prefix='/api/v1/data')
     app.register_blueprint(analysis_bp, url_prefix='/api/v1/analysis')
     app.register_blueprint(forecast_bp, url_prefix='/api/v1/forecast')
     app.register_blueprint(impact_bp, url_prefix='/api/v1/impact')
-    app.register_blueprint(scenarios_bp, url_prefix='/api/v1/scenarios')  # ADD THIS
 
     # Root endpoint
     @app.route('/')
@@ -52,8 +50,7 @@ def create_app():
                 'data': '/api/v1/data',
                 'analysis': '/api/v1/analysis',
                 'forecast': '/api/v1/forecast',
-                'impact': '/api/v1/impact',
-                'scenarios': '/api/v1/scenarios'  # ADD THIS
+                'impact': '/api/v1/impact'
             }
         })
 
