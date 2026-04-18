@@ -246,7 +246,7 @@ class DataService:
         
         years = annual.year.values.tolist()
         values = [round(float(v), 3) if not np.isnan(v) else None for v in annual.values]
-        
+
         return {
             'variable': variable,
             'variable_info': self.config.CLIMATE_VARIABLES.get(variable, {}),
@@ -255,6 +255,70 @@ class DataService:
             'data': {
                 'years': years,
                 'values': values
+            }
+        }
+
+    def get_spatial_data(
+        self,
+        variable: str,
+        start_year: Optional[int] = None,
+        end_year: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get per-region climate mean for all 9 Himalayan regions.
+        Loads the dataset once and extracts each region's spatiotemporal mean.
+        Used to power the spatial heatmap visualization.
+        """
+        ds = self.load_dataset(variable)
+        data = ds[variable]
+
+        # Apply time filter once before slicing regions
+        if start_year:
+            data = data.sel(time=data.time.dt.year >= start_year)
+        if end_year:
+            data = data.sel(time=data.time.dt.year <= end_year)
+
+        region_results = {}
+        all_values = []
+
+        for region_code, region_info in self.config.REGIONS.items():
+            bounds = region_info['bounds']
+            try:
+                region_slice = data.sel(
+                    lat=slice(bounds['south'], bounds['north']),
+                    lon=slice(bounds['west'], bounds['east'])
+                )
+                raw = float(region_slice.mean(dim=['lat', 'lon', 'time']))
+                value = round(raw, 3) if not np.isnan(raw) else None
+            except Exception:
+                value = None
+
+            if value is not None:
+                all_values.append(value)
+
+            region_results[region_code] = {
+                'value': value,
+                'name': region_info['name'],
+                'zone': region_info['zone'],
+                'elevation_range': region_info['elevation_range'],
+                'center': region_info['center'],
+                'color': region_info['color'],
+                'climate_zone': region_info['climate_zone'],
+                'vulnerability_index': region_info['vulnerability_index'],
+            }
+
+        time_values = data.time.values
+        return {
+            'variable': variable,
+            'variable_info': self.config.CLIMATE_VARIABLES.get(variable, {}),
+            'time_range': {
+                'start': str(pd.Timestamp(time_values[0]).date()) if len(time_values) > 0 else None,
+                'end': str(pd.Timestamp(time_values[-1]).date()) if len(time_values) > 0 else None,
+            },
+            'regions': region_results,
+            'value_range': {
+                'min': round(min(all_values), 3) if all_values else None,
+                'max': round(max(all_values), 3) if all_values else None,
             }
         }
 

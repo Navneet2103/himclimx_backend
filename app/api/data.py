@@ -119,3 +119,34 @@ def get_annual_data():
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@data_bp.route('/spatial', methods=['GET'])
+def get_spatial_data():
+    """
+    Get per-region climate summary for all 9 Himalayan regions.
+    Powers the spatial heatmap visualization on the frontend.
+
+    Query Parameters:
+        variable (str): Climate variable code (required)
+        start_year (int): Start year (optional)
+        end_year (int): End year (optional)
+    """
+    variable = request.args.get('variable')
+    start_year = request.args.get('start_year', type=int)
+    end_year = request.args.get('end_year', type=int)
+
+    if not variable:
+        return jsonify({'error': 'Variable is required'}), 400
+    if variable not in config.CLIMATE_VARIABLES:
+        return jsonify({'error': f'Invalid variable: {variable}'}), 400
+
+    try:
+        result = data_service.get_spatial_data(
+            variable=variable,
+            start_year=start_year,
+            end_year=end_year,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
