@@ -25,6 +25,7 @@ class DataService:
         self.config = Config()
         self.zarr_base = self.config.ZARR_BASE_PATH
         self._dataset_cache = {}
+        self._spatial_cache = {}
     
     def get_zarr_url(self, variable: str) -> str:
         """Get the Zarr store URL for a variable"""
@@ -266,17 +267,36 @@ class DataService:
     ) -> Dict[str, Any]:
         """
         Get per-region climate mean for all 9 Himalayan regions.
-        Loads the dataset once and extracts each region's spatiotemporal mean.
-        Used to power the spatial heatmap visualization.
+        Computes time mean once across the full domain, then slices regions
+        from the in-memory result — avoids 9 separate R2 chunk downloads.
         """
+        cache_key = (variable, start_year, end_year)
+        if cache_key in self._spatial_cache:
+            return self._spatial_cache[cache_key]
+
         ds = self.load_dataset(variable)
         data = ds[variable]
 
-        # Apply time filter once before slicing regions
         if start_year:
             data = data.sel(time=data.time.dt.year >= start_year)
         if end_year:
             data = data.sel(time=data.time.dt.year <= end_year)
+
+        time_values = data.time.values
+
+        # Clip to Himalayan domain BEFORE computing mean — the source file is the
+        # full global CRU grid (360×720). Clipping first means we only download the
+        # ~24×48 Himalayan grid points from R2 instead of the full global dataset.
+        # Bounds cover all 9 study regions with a context margin.
+        HIMALAYA_LAT = (24.0, 36.0)
+        HIMALAYA_LON = (68.0, 92.0)
+        himalaya_data = data.sel(
+            lat=slice(HIMALAYA_LAT[0], HIMALAYA_LAT[1]),
+            lon=slice(HIMALAYA_LON[0], HIMALAYA_LON[1]),
+        )
+
+        # Single R2 download + time mean for the Himalayan domain only
+        spatial_mean = himalaya_data.mean(dim='time').compute()
 
         region_results = {}
         all_values = []
@@ -284,11 +304,11 @@ class DataService:
         for region_code, region_info in self.config.REGIONS.items():
             bounds = region_info['bounds']
             try:
-                region_slice = data.sel(
+                region_slice = spatial_mean.sel(
                     lat=slice(bounds['south'], bounds['north']),
                     lon=slice(bounds['west'], bounds['east'])
                 )
-                raw = float(region_slice.mean(dim=['lat', 'lon', 'time']))
+                raw = float(region_slice.mean(dim=['lat', 'lon']))
                 value = round(raw, 3) if not np.isnan(raw) else None
             except Exception:
                 value = None
@@ -307,13 +327,24 @@ class DataService:
                 'vulnerability_index': region_info['vulnerability_index'],
             }
 
-        time_values = data.time.values
-        return {
+        lats = [round(float(v), 3) for v in spatial_mean.lat.values]
+        lons = [round(float(v), 3) for v in spatial_mean.lon.values]
+        grid_values = [
+            [None if np.isnan(float(v)) else round(float(v), 3) for v in row]
+            for row in spatial_mean.values
+        ]
+
+        result = {
             'variable': variable,
             'variable_info': self.config.CLIMATE_VARIABLES.get(variable, {}),
             'time_range': {
                 'start': str(pd.Timestamp(time_values[0]).date()) if len(time_values) > 0 else None,
                 'end': str(pd.Timestamp(time_values[-1]).date()) if len(time_values) > 0 else None,
+            },
+            'gridded': {
+                'lats': lats,
+                'lons': lons,
+                'values': grid_values,
             },
             'regions': region_results,
             'value_range': {
@@ -321,6 +352,8 @@ class DataService:
                 'max': round(max(all_values), 3) if all_values else None,
             }
         }
+        self._spatial_cache[cache_key] = result
+        return result
 
 
 # Singleton instance
