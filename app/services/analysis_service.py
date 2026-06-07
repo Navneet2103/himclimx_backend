@@ -28,36 +28,57 @@ class AnalysisService:
     ) -> Dict[str, Any]:
         """
         Calculate linear trend with statistical significance.
+        Aggregates to annual means first — removes seasonal noise and is the
+        standard approach in climate science (WMO guidelines).
         """
         try:
-            # Convert to numpy arrays
-            dates = pd.to_datetime(times)
-            years = dates.year.values.astype(float)
-            vals = np.array([v for v in values if v is not None])
-            
-            if len(vals) < 10:
-                return {'error': 'Insufficient data for trend analysis'}
-            
-            # Filter out NaN values
-            mask = ~np.isnan(vals)
-            years_clean = years[mask]
-            vals_clean = vals[mask]
-            
-            # Linear regression
-            slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(years_clean, vals_clean)
-            
-            # Mann-Kendall test for trend significance
-            mk_result = self._mann_kendall_test(vals_clean)
-            
+            df = pd.DataFrame({'date': pd.to_datetime(times), 'value': values})
+            df = df.dropna(subset=['value'])
+
+            if len(df) < 24:
+                return {'error': 'Insufficient data for trend analysis (need ≥ 2 years)'}
+
+            # Aggregate to annual means — removes intra-annual seasonal noise
+            df['year'] = df['date'].dt.year
+            annual = df.groupby('year')['value'].mean().dropna()
+
+            if len(annual) < 5:
+                return {'error': 'Insufficient annual data for trend analysis'}
+
+            years_arr = annual.index.values.astype(float)
+            vals_arr  = annual.values
+
+            # OLS linear regression on annual means
+            slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(years_arr, vals_arr)
+
+            # Sen's slope (robust estimator — preferred in climate studies)
+            n = len(vals_arr)
+            slopes = []
+            for i in range(n - 1):
+                for j in range(i + 1, n):
+                    dy = vals_arr[j] - vals_arr[i]
+                    dx = years_arr[j] - years_arr[i]
+                    if dx != 0:
+                        slopes.append(dy / dx)
+            sens_slope = float(np.median(slopes)) if slopes else float(slope)
+
+            # Mann-Kendall test on annual data
+            mk_result = self._mann_kendall_test(vals_arr)
+
+            mean_val = float(np.mean(vals_arr))
             return {
-                'slope': round(float(slope), 6),
-                'intercept': round(float(intercept), 3),
-                'r_squared': round(float(r_value**2), 4),
-                'p_value': round(float(p_value), 6),
-                'std_err': round(float(std_err), 6),
-                'per_decade': round(float(slope * 10), 4),
-                'percent_change': round(float((slope * 10) / np.mean(vals_clean) * 100), 2) if np.mean(vals_clean) != 0 else 0.0,
-                'mann_kendall': mk_result
+                'slope':          round(float(slope), 6),
+                'intercept':      round(float(intercept), 3),
+                'r_squared':      round(float(r_value ** 2), 4),
+                'p_value':        round(float(p_value), 6),
+                'std_err':        round(float(std_err), 6),
+                'per_decade':     round(float(slope * 10), 4),
+                'sens_slope':     round(sens_slope, 6),
+                'sens_per_decade': round(sens_slope * 10, 4),
+                'percent_change': round(float((slope * 10) / mean_val * 100), 2) if mean_val != 0 else 0.0,
+                'annual_values':  [round(float(v), 3) for v in vals_arr],
+                'annual_years':   [int(y) for y in years_arr],
+                'mann_kendall':   mk_result,
             }
         except Exception as e:
             logger.error(f"Trend calculation error: {str(e)}")

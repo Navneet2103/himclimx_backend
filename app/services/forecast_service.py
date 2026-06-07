@@ -13,13 +13,19 @@ from app.config import Config
 
 logger = logging.getLogger(__name__)
 
-# Try to import Prophet
 try:
     from prophet import Prophet
     PROPHET_AVAILABLE = True
 except ImportError:
     PROPHET_AVAILABLE = False
-    logger.warning("Prophet not available. Forecast features will be limited.")
+    logger.warning("Prophet not available, will use Holt-Winters ETS.")
+
+try:
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+    ETS_AVAILABLE = True
+except ImportError:
+    ETS_AVAILABLE = False
+    logger.warning("statsmodels not available, will use linear fallback.")
 
 
 class ForecastService:
@@ -35,69 +41,116 @@ class ForecastService:
         years: int = 5
     ) -> Dict[str, Any]:
         """
-        Generate forecast using Prophet.
+        Forecast pipeline: Prophet → Holt-Winters ETS → linear fallback.
         """
-        if not PROPHET_AVAILABLE:
-            return self._simple_forecast(times, values, years)
-        
-        try:
-            # Prepare data for Prophet
-            df = pd.DataFrame({
-                'ds': pd.to_datetime(times),
-                'y': values
-            })
-            df = df.dropna()
-            
-            if len(df) < 24:  # Need at least 2 years of data
-                return {'error': 'Insufficient data for forecasting'}
-            
-            # Create and fit model
-            model = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-                changepoint_prior_scale=0.05
-            )
-            
-            # Suppress Prophet logging
-            import logging
-            logging.getLogger('prophet').setLevel(logging.WARNING)
-            logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
-            
-            model.fit(df)
-            
-            # Make future dataframe
-            future = model.make_future_dataframe(periods=years * 12, freq='MS')
-            forecast = model.predict(future)
-            
-            # Get forecast period only
-            forecast_only = forecast.tail(years * 12)
-            
-            # Calculate change rate
-            historical_mean = df['y'].mean()
-            forecast_mean = forecast_only['yhat'].mean()
-            change_rate = ((forecast_mean - historical_mean) / historical_mean * 100) if historical_mean != 0 else 0
-            
-            # Determine trend direction
-            if change_rate > 5:
-                trend = 'increasing'
-            elif change_rate < -5:
-                trend = 'decreasing'
-            else:
-                trend = 'stable'
-            
-            return {
-                'dates': forecast_only['ds'].dt.strftime('%Y-%m-%d').tolist(),
-                'values': [round(float(v), 3) for v in forecast_only['yhat']],
-                'lower': [round(float(v), 3) for v in forecast_only['yhat_lower']],
-                'upper': [round(float(v), 3) for v in forecast_only['yhat_upper']],
-                'trend': trend,
-                'change_rate': round(float(change_rate), 2),
-                'method': 'prophet'
-            }
-        except Exception as e:
-            logger.error(f"Prophet forecast error: {str(e)}")
-            return self._simple_forecast(times, values, years)
+        if PROPHET_AVAILABLE:
+            try:
+                return self._prophet_forecast(times, values, years)
+            except Exception as e:
+                logger.warning(f"Prophet failed ({e}), falling back to ETS.")
+
+        if ETS_AVAILABLE:
+            try:
+                return self._ets_forecast(times, values, years)
+            except Exception as e:
+                logger.warning(f"ETS failed ({e}), falling back to linear.")
+
+        return self._simple_forecast(times, values, years)
+
+    def _prophet_forecast(
+        self,
+        times: List[str],
+        values: List[float],
+        years: int = 5
+    ) -> Dict[str, Any]:
+        """Prophet forecast with improved climate-specific settings."""
+        df = pd.DataFrame({'ds': pd.to_datetime(times), 'y': values}).dropna()
+
+        if len(df) < 24:
+            raise ValueError('Insufficient data for Prophet (need ≥ 24 months)')
+
+        logging.getLogger('prophet').setLevel(logging.WARNING)
+        logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+
+        model = Prophet(
+            yearly_seasonality=True,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            changepoint_prior_scale=0.1,   # more responsive to climate shifts
+            seasonality_prior_scale=10.0,
+            seasonality_mode='additive',
+            interval_width=0.95,
+        )
+        model.fit(df)
+
+        future = model.make_future_dataframe(periods=years * 12, freq='MS')
+        forecast = model.predict(future)
+        fc = forecast.tail(years * 12)
+
+        historical_mean = df['y'].tail(24).mean()
+        forecast_mean   = fc['yhat'].mean()
+        change_rate = ((forecast_mean - historical_mean) / historical_mean * 100) if historical_mean != 0 else 0
+
+        return {
+            'dates':       fc['ds'].dt.strftime('%Y-%m-%d').tolist(),
+            'values':      [round(float(v), 3) for v in fc['yhat']],
+            'lower':       [round(float(v), 3) for v in fc['yhat_lower']],
+            'upper':       [round(float(v), 3) for v in fc['yhat_upper']],
+            'trend':       'increasing' if change_rate > 3 else ('decreasing' if change_rate < -3 else 'stable'),
+            'change_rate': round(float(change_rate), 2),
+            'method':      'prophet',
+        }
+
+    def _ets_forecast(
+        self,
+        times: List[str],
+        values: List[float],
+        years: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Holt-Winters triple exponential smoothing (additive trend + additive seasonality).
+        Well-suited for monthly climate data with regular annual cycles.
+        """
+        df = pd.DataFrame({'date': pd.to_datetime(times), 'value': values}).dropna()
+
+        if len(df) < 24:
+            raise ValueError('Insufficient data for ETS (need ≥ 24 months)')
+
+        model = ExponentialSmoothing(
+            df['value'].values,
+            trend='add',
+            seasonal='add',
+            seasonal_periods=12,
+            initialization_method='estimated',
+        )
+        fit = model.fit(optimized=True, use_brute=False)
+
+        n = years * 12
+        forecast_vals = fit.forecast(n)
+
+        last_date    = df['date'].max()
+        future_dates = pd.date_range(
+            start=last_date + pd.DateOffset(months=1), periods=n, freq='MS'
+        )
+
+        # Growing uncertainty: σ * √h (standard ETS prediction interval)
+        resid_std = float(np.std(fit.resid)) if len(fit.resid) > 0 else float(np.std(df['value'].values) * 0.05)
+        lower = [round(float(v - 1.96 * resid_std * np.sqrt(i + 1)), 3) for i, v in enumerate(forecast_vals)]
+        upper = [round(float(v + 1.96 * resid_std * np.sqrt(i + 1)), 3) for i, v in enumerate(forecast_vals)]
+
+        historical_mean = float(df['value'].tail(24).mean())
+        forecast_mean   = float(np.mean(forecast_vals))
+        change_rate = ((forecast_mean - historical_mean) / historical_mean * 100) if historical_mean != 0 else 0
+
+        return {
+            'dates':       future_dates.strftime('%Y-%m-%d').tolist(),
+            'values':      [round(float(v), 3) for v in forecast_vals],
+            'lower':       lower,
+            'upper':       upper,
+            'trend':       'increasing' if change_rate > 3 else ('decreasing' if change_rate < -3 else 'stable'),
+            'change_rate': round(float(change_rate), 2),
+            'method':      'holt_winters_ets',
+        }
     
     def _simple_forecast(
         self,
