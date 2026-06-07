@@ -70,7 +70,9 @@ class AnalysisService:
                 'slope':          round(float(slope), 6),
                 'intercept':      round(float(intercept), 3),
                 'r_squared':      round(float(r_value ** 2), 4),
-                'p_value':        round(float(p_value), 6),
+                # Do NOT round p_value — rounding to 6dp truncates values like 1e-30 to 0.0,
+                # making confidence = (1 - 0) * 100 = 100% on the frontend.
+                'p_value':        float(p_value),
                 'std_err':        round(float(std_err), 6),
                 'per_decade':     round(float(slope * 10), 4),
                 'sens_slope':     round(sens_slope, 6),
@@ -107,7 +109,7 @@ class AnalysisService:
             else:
                 z = 0
             
-            # P-value (two-tailed)
+            # P-value (two-tailed) — keep full float precision (no rounding)
             p_value = 2 * (1 - scipy_stats.norm.cdf(abs(z)))
             
             # Kendall's tau
@@ -121,7 +123,7 @@ class AnalysisService:
             
             return {
                 'trend': trend,
-                'p_value': round(float(p_value), 6),
+                'p_value': float(p_value),
                 'tau': round(float(tau), 4),
                 'z_statistic': round(float(z), 4)
             }
